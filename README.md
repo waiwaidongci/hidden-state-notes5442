@@ -58,13 +58,23 @@ Viterbi在相同log空间用max替代sum，保留每个状态的最佳前缀路�
 
 ## 实体、工程与校验
 
-78个有职责的Python/TS/Vue/CSS文件（不含空包、依赖和dist）。五实体SequenceStudy → ModelProfile → ObservationTrace → InferenceRun → InterpretationNote贯穿ORM/schema/service/routes、前端API/store和六页：隐态总览、观测与版本、固定模型推断、后验与联合路径、工况核对、过程留痕。
+80个有职责的Python/TS/Vue/CSS文件（不含空包、依赖和dist）。五实体SequenceStudy → ModelProfile → ObservationTrace → InferenceRun → InterpretationNote贯穿ORM/schema/service/routes、前端API/store和六页：隐态总览、观测与版本、固定模型推断、后验与联合路径、工况核对、过程留痕。
 
 前端 `src/{api,stores,types,components/common,hooks,pages,router,utils,constants}`；后端 `src/{routes,controllers,services,models,schemas,middlewares,utils,constants,config}`，另scripts/seed_demo.py与migrations/。StateBands、InferenceSummary、ProfileMatrix、RunList多页复用，PosteriorGrid只展示后端后验；useTask/useRoute与format处理交互。Vue的id=app/mount('#app')匹配。
 
 Role/RunStatus/NoteStatus位于 `backend/src/constants/enums.py`，前端对应 `frontend/src/constants/enums.ts`。JWT、审计、RequestID/Error/Redis写限流三个中间件形成横切链路。按令牌摘要或无令牌IP分钟计数，默认60写请求，429含Retry-After；计数不可用503，健康GET不计。审批行锁使draft只审一次，导出取result_snapshot。
 
-每研究1–240轨迹，每条1–200码，单任务1–30条、状态≤5；重复ID、外研究轨迹/版本、未知码、非法矩阵维度、NaN/Inf/bool概率或ID、安全行和以422拒绝。任务提交时同时冻结profile与所选trace，之后修订源记录不影响worker输入或批准快照。
+每研究1–240轨迹，每条1–100000码，单任务1–30条、状态≤5；重复ID、外研究轨迹/版本、未知码、非法矩阵维度、NaN/Inf/bool概率或ID、安全行和以422拒绝。任务提交时同时冻结profile与所选trace，之后修订源记录不影响worker输入或批准快照。
+
+### 长轨迹与分段存储（100000码 / 五隐态）
+
+单条轨迹超过200码时自动走流式两遍法（`services/engine.py`）：第一遍逐块前向 log α 与 log Viterbi（父指针+前缀秩），第二遍逆块后向 log β 并回填边际后验。**分块（默认1000码/块）只是存储与查看单位，推断始终在完整序列上一次完成**：块边界共用同一个全局转移矩阵，后向 β 跨块接续，不存在分段各算各的、跨段零转移被忽略或后段观测无法改变前段后验的问题。
+
+- 峰值内存与序列长度无关：α/β/父指针按块写入 `ARTIFACT_DIR/runs/{run_id}/trace-{trace_id}/`（`blocks.jsonl` + `manifest.json`），实测100000码五隐态推断峰值RSS约48MB，远低于256MB约束。
+- 数据库只保存轨迹级摘要（logL、整条Viterbi/边际路径、区段索引、artifact_key），全序列后验与逐时刻log数组不落库；`GET /runs/{id}/traces/{trace_id}/segments[/{index}]` 按区段懒加载，越界区段404。
+- 短轨迹（≤200码）保持历史内联结构逐键不变（`result_schema=inline-v1`），旧运行与旧批准说明快照持续可读；长轨迹结果标记 `result_schema=segments-v1`。
+- 批准说明可导出完整明细：内联结果沿用原CSV路径，分段结果逐块流式读取artifact生成同样16列CSV，导出进程不一次性载入全序列。任务失败时清理半成品artifact，不拼接部分成功结果。
+- 平局规则、精确零（JSON `null` 表示 −∞，无概率地板）、下溢标记（logL有限、线性概率null）在两条路径上口径完全一致。
 
 MySQL累计logL及最大归一delta列用DOUBLE(asdecimal=False)，保持Python float。当前MySQL JSON读回与DOUBLE列在累计logL约−969时可差1ULP（约1.14e−13），验收按2ULP检查，完整结果保留实际读回数值。
 
@@ -73,7 +83,7 @@ MySQL累计logL及最大归一delta列用DOUBLE(asdecimal=False)，保持Python 
 |前端|Vue3 / TypeScript / Vite6.4.6，Barlow+Noto Serif SC，石墨/温黄/赤铜状态带|
 |后端|Python3.11 / FastAPI / SQLAlchemy / MySQL8|
 |队列|Celery5.4 / Kombu5.4.2 / Redis7，worker并发1|
-|算法|SciPy logsumexp前后向、手写log Viterbi、真实零约束与归一记录|
+|算法|纯numpy logsumexp前后向（全−inf静默处理）、手写log Viterbi（父指针+前缀秩字典序平局）、分块artifact流式存储，真实零约束与归一记录|
 
 本地前端 `cd frontend && npm ci && npm run dev`；`npm run build`执行vue-tsc/Vite。后端安装requirements、配置DATABASE_URL/REDIS_URL/JWT_SECRET后运行uvicorn。ORM create_all初始化，migrations仅初始结构说明，不声称生产迁移链。MIT许可证见LICENSE。
 
